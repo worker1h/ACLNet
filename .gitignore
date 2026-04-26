@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and IDE files
+.idea/
+.vscode/
+.env
+.venv/
+venv/
+
+# Local data and generated experiment artifacts
+ecg_acl/data/
+ecg_acl/work_dirs/
+ecg_acl/analysis_outputs/
+acl/data/*
+!acl/data/README.md
+
+# Large or local reference artifacts
+*.zip
+*.pdf
+*.docx
+~$*
+_docx_render/
+main.py
+
+# Generated visualization outputs
+visualizations/

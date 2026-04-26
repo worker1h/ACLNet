@@ -1,0 +1,50 @@
+seed: 42
+data:
+  train_npz: ecg_acl/data/mitbih/processed/train.npz
+  val_npz: ecg_acl/data/mitbih/processed/val.npz
+  test_npz: ecg_acl/data/mitbih/processed/test.npz
+  num_classes: 5
+  input_channels: 1
+  input_length: 216
+model:
+  name: fusion
+  embedding_dim: 256
+  branch_dim: 128
+  birnn_hidden: 64
+  birnn_layers: 2
+  dropout: 0.3
+  branches: [birnn, efficientnet, sequential, lenet]
+  aux_weight: 0.2
+train:
+  epochs: 80
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+  device: auto
+  selection_metric: macro_f1
+imbalance:
+  weighted_sampler: true
+  loss_type: class_balanced_focal
+  class_balanced_loss: true
+  effective_num_beta: 0.999
+  max_class_weight: 8.0
+  focal_gamma: 1.0
+augmentation:
+  enabled: false
+  minority_only: true
+  minority_max_fraction: 0.25
+  noise_std: 0.02
+  scale_std: 0.08
+  max_shift: 8
+affinity:
+  start_epoch: 20
+  top_k: 5
+  overlap_threshold: 2
+  inter_weight: 0.1
+  intra_weight: 0.1
+  temperature: 0.1
+  margin: 0.1
+  memory_size: 1024
+output:
+  work_dir: ecg_acl/work_dirs/fusion_focal_gamma1_acl
