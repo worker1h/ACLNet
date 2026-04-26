@@ -41,8 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--val-records",
         default=None,
-        help="Comma-separated DS1 record ids to hold out for validation. Overrides automatic record split.",
+        help="Comma-separated DS1 record ids to hold out for validation. Use semicolons for multiple folds.",
     )
+    parser.add_argument("--num-val-folds", type=int, default=1, help="Number of disjoint record-level validation folds.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -181,6 +182,95 @@ def _counts(y: np.ndarray) -> dict[str, int]:
     return {name: int((y == idx).sum()) for idx, name in enumerate(AAMI_CLASSES)}
 
 
+def _select_record_group(
+    y: np.ndarray,
+    records: np.ndarray,
+    candidate_records: list[str],
+    val_ratio: float,
+    seed: int,
+) -> list[str]:
+    rng = np.random.default_rng(seed)
+    record_counts = {
+        record: np.bincount(y[records == record], minlength=len(AAMI_CLASSES)).astype(np.float64)
+        for record in candidate_records
+    }
+    total_counts = np.bincount(y, minlength=len(AAMI_CLASSES)).astype(np.float64)
+    target_counts = np.maximum(total_counts * val_ratio, 1.0)
+    target_samples = max(float(len(y) * val_ratio), 1.0)
+    positive_classes = total_counts > 0
+    target_record_count = max(1, int(round(len(set(records.tolist())) * val_ratio)))
+    candidate_sizes = sorted(
+        {
+            max(1, min(len(candidate_records), target_record_count + offset))
+            for offset in range(-1, 4)
+        }
+    )
+
+    best_key: tuple[float, float, float, float, float] | None = None
+    val_records = []
+    for size in candidate_sizes:
+        for combo in itertools.combinations(candidate_records, size):
+            val_counts = np.sum([record_counts[record] for record in combo], axis=0)
+            missing = int(((val_counts == 0) & positive_classes).sum())
+            count_error = float(np.mean(((val_counts - target_counts) / target_counts) ** 2))
+            sample_error = abs(float(val_counts.sum()) - target_samples) / target_samples
+            record_error = abs(size - target_record_count) / max(float(target_record_count), 1.0)
+            jitter = float(rng.random() * 1e-6)
+            key = (float(missing), count_error, sample_error, record_error, jitter)
+            if best_key is None or key < best_key:
+                best_key = key
+                val_records = list(combo)
+    return val_records
+
+
+def _parse_val_record_groups(value: str | None) -> list[list[str]] | None:
+    if not value:
+        return None
+    groups = []
+    for group in value.split(";"):
+        records = sorted({item.strip() for item in group.split(",") if item.strip()})
+        if records:
+            groups.append(records)
+    return groups or None
+
+
+def _record_val_folds(
+    y: np.ndarray,
+    records: np.ndarray,
+    val_ratio: float,
+    seed: int,
+    num_val_folds: int,
+    explicit_val_records: str | None = None,
+) -> tuple[np.ndarray, list[np.ndarray], list[list[str]]]:
+    unique_records = sorted(set(records.tolist()))
+    explicit_groups = _parse_val_record_groups(explicit_val_records)
+    if explicit_groups:
+        val_folds = explicit_groups
+        unknown = sorted(set().union(*[set(group) for group in val_folds]) - set(unique_records))
+        if unknown:
+            raise ValueError(f"Validation records not found in DS1 data: {unknown}")
+    else:
+        remaining = unique_records[:]
+        val_folds = []
+        for fold_idx in range(max(1, num_val_folds)):
+            if not remaining:
+                break
+            group = _select_record_group(y, records, remaining, val_ratio, seed + fold_idx)
+            if not group:
+                break
+            val_folds.append(group)
+            remaining = [record for record in remaining if record not in set(group)]
+
+    used_val_records = sorted(set().union(*[set(group) for group in val_folds])) if val_folds else []
+    val_fold_indices = [np.where(np.isin(records, group))[0] for group in val_folds]
+    if not val_fold_indices or not any(len(indices) for indices in val_fold_indices):
+        raise RuntimeError("Record-level validation split produced an empty validation set.")
+    train_idx = np.where(~np.isin(records, used_val_records))[0]
+    if len(train_idx) == 0:
+        raise RuntimeError("Record-level validation split used all records and left no training set.")
+    return train_idx, val_fold_indices, val_folds
+
+
 def _record_val_split(
     y: np.ndarray,
     records: np.ndarray,
@@ -188,50 +278,19 @@ def _record_val_split(
     seed: int,
     explicit_val_records: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    unique_records = sorted(set(records.tolist()))
-    if explicit_val_records:
-        val_records = sorted({item.strip() for item in explicit_val_records.split(",") if item.strip()})
-        unknown = sorted(set(val_records) - set(unique_records))
-        if unknown:
-            raise ValueError(f"Validation records not found in DS1 data: {unknown}")
-    else:
-        rng = np.random.default_rng(seed)
-        record_counts = {
-            record: np.bincount(y[records == record], minlength=len(AAMI_CLASSES)).astype(np.float64)
-            for record in unique_records
-        }
-        total_counts = np.bincount(y, minlength=len(AAMI_CLASSES)).astype(np.float64)
-        target_counts = np.maximum(total_counts * val_ratio, 1.0)
-        target_samples = max(float(len(y) * val_ratio), 1.0)
-        positive_classes = total_counts > 0
-        target_record_count = max(1, int(round(len(unique_records) * val_ratio)))
-        candidate_sizes = sorted(
-            {
-                max(1, min(len(unique_records), target_record_count + offset))
-                for offset in range(-1, 4)
-            }
-        )
-
-        best_key: tuple[float, float, float, float, float] | None = None
-        val_records = []
-        for size in candidate_sizes:
-            for combo in itertools.combinations(unique_records, size):
-                val_counts = np.sum([record_counts[record] for record in combo], axis=0)
-                missing = int(((val_counts == 0) & positive_classes).sum())
-                count_error = float(np.mean(((val_counts - target_counts) / target_counts) ** 2))
-                sample_error = abs(float(val_counts.sum()) - target_samples) / target_samples
-                record_error = abs(size - target_record_count) / max(float(target_record_count), 1.0)
-                jitter = float(rng.random() * 1e-6)
-                key = (float(missing), count_error, sample_error, record_error, jitter)
-                if best_key is None or key < best_key:
-                    best_key = key
-                    val_records = list(combo)
-
+    train_idx, val_fold_indices, val_folds = _record_val_folds(
+        y,
+        records,
+        val_ratio,
+        seed,
+        1,
+        explicit_val_records,
+    )
+    val_idx = val_fold_indices[0]
+    val_records = val_folds[0]
     val_mask = np.isin(records, val_records)
     if not val_mask.any():
         raise RuntimeError("Record-level validation split produced an empty validation set.")
-    train_idx = np.where(~val_mask)[0]
-    val_idx = np.where(val_mask)[0]
     return train_idx, val_idx, val_records
 
 
@@ -292,17 +351,37 @@ def main() -> None:
         args.rr_window,
         args.max_rr_ratio,
     )
+    val_fold_indices: list[np.ndarray] = []
+    val_folds: list[list[str]] = []
     if args.split_mode == "record":
-        train_idx, val_idx, val_records = _record_val_split(
+        train_idx, val_fold_indices, val_folds = _record_val_folds(
             y_train_all,
             train_records_all,
             args.val_ratio,
             args.seed,
+            args.num_val_folds,
             args.val_records,
         )
+        val_idx = np.concatenate(val_fold_indices)
+        val_records = sorted(set().union(*[set(group) for group in val_folds]))
     else:
         train_idx, val_idx = _stratified_val_split(y_train_all, args.val_ratio, args.seed)
         val_records = sorted(set(train_records_all[val_idx].tolist()))
+        val_fold_indices = [val_idx]
+        val_folds = [val_records]
+
+    val_fold_summaries = []
+    for fold_idx, fold_indices in enumerate(val_fold_indices, start=1):
+        val_fold_summaries.append(
+            _save_npz(
+                out / f"val_fold_{fold_idx:02d}.npz",
+                x_train_all[fold_indices],
+                y_train_all[fold_indices],
+                train_records_all[fold_indices],
+                train_samples_all[fold_indices],
+                channel_names,
+            )
+        )
 
     summary = {
         "class_names": AAMI_CLASSES,
@@ -312,7 +391,10 @@ def main() -> None:
         "max_rr_ratio": args.max_rr_ratio,
         "split_mode": args.split_mode,
         "val_ratio": args.val_ratio,
+        "num_val_folds": len(val_fold_indices),
         "val_records": val_records,
+        "val_folds": val_folds,
+        "val_fold_npzs": [str(out / f"val_fold_{idx:02d}.npz") for idx in range(1, len(val_fold_indices) + 1)],
         "input_channels": len(channel_names),
         "input_length": args.target_len,
         "splits": {
@@ -334,6 +416,7 @@ def main() -> None:
             ),
             "test": _save_npz(out / "test.npz", x_test, y_test, test_records_all, test_samples_all, channel_names),
         },
+        "val_fold_summaries": val_fold_summaries,
         "train_records": train_records,
         "test_records": test_records,
     }

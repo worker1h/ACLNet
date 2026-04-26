@@ -37,13 +37,15 @@ python ecg_acl/scripts/preprocess_mitbih.py --raw ecg_acl/data/mitbih/raw --out 
 To build the RR + neighbor-beat variant:
 
 ```shell
-python ecg_acl/scripts/preprocess_mitbih_context_rr.py --raw ecg_acl/data/mitbih/raw --out ecg_acl/data/mitbih_context_rr_record/processed --split-mode record
+python ecg_acl/scripts/preprocess_mitbih_context_rr.py --raw ecg_acl/data/mitbih/raw --out ecg_acl/data/mitbih_context_rr_record/processed --split-mode record --num-val-folds 3
 ```
 
 This writes 7-channel beats by default: previous/current/next beat waveforms
 plus previous RR ratio, next RR ratio, RR delta ratio, and local RR ratio.
 The default split mode holds out whole DS1 records for validation to reduce
-patient/record leakage.
+patient/record leakage. With `--num-val-folds 3`, the script writes
+`val_fold_01.npz`, `val_fold_02.npz`, and `val_fold_03.npz`; training averages
+validation metrics across these folds when `data.val_npzs` is configured.
 
 ## Train
 
@@ -117,8 +119,15 @@ Configs can also keep top-k candidates for multiple validation metrics:
 
 ```yaml
 train:
-  selection_metric: balanced_acc
-  selection_metrics: [balanced_acc, macro_f1, minority_f1]
+  selection_metric: constrained_macro_f1
+  selection_metrics: [constrained_macro_f1, constrained_minority_f1, macro_f1, minority_f1, balanced_acc]
+  min_selection_epoch: 5
+  composite_metrics:
+    constrained_macro_f1:
+      base_metric: macro_f1
+      acc_metric: acc
+      min_acc: 0.88
+      penalty_weight: 1.0
   save_top_k: 5
 ```
 

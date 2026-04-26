@@ -12,8 +12,10 @@ if str(SRC) not in sys.path:
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, StepLR
+from torch.utils.data import DataLoader
 
 try:
     from tqdm import tqdm as _tqdm
@@ -26,6 +28,7 @@ except ImportError:
         return iterable
 
 from ecg_acl.config import load_config
+from ecg_acl.data import ECGNpzDataset
 from ecg_acl.losses import InterAffinityContrastiveLoss, IntraMarginContrastiveLoss
 from ecg_acl.metrics import AverageMeter, ConfusionMeter, ReliabilityZoneMeter, accuracy
 from ecg_acl.model import build_ecg_model, unpack_model_output
@@ -43,7 +46,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", default=None, help="Override output directory.")
     parser.add_argument(
         "--selection-metric",
-        choices=["acc", "macro_f1", "balanced_acc", "minority_recall", "minority_f1"],
         default=None,
         help="Validation metric used for best/top-k checkpoint selection.",
     )
@@ -55,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--grad-clip-norm", type=float, default=None, help="Override gradient clipping max norm.")
     parser.add_argument("--early-stopping-patience", type=int, default=None, help="Override early stopping patience.")
+    parser.add_argument("--min-selection-epoch", type=int, default=None, help="Do not save/select checkpoints before this epoch.")
     parser.add_argument(
         "--model",
         choices=["resnet1d", "fusion"],
@@ -219,6 +222,106 @@ def _selection_score(metrics: dict, metric_name: str) -> float:
     return float(metrics[metric_name])
 
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return list(value)
+
+
+def _apply_composite_metrics(metrics: dict, cfg: dict) -> dict:
+    composite = cfg.get("train", {}).get("composite_metrics", {}) or {}
+    for name, spec in composite.items():
+        if not isinstance(spec, dict):
+            raise ValueError(f"composite_metrics.{name} must be a mapping")
+        base_metric = str(spec.get("base_metric", "macro_f1"))
+        acc_metric = str(spec.get("acc_metric", "acc"))
+        min_acc = float(spec.get("min_acc", 0.0))
+        penalty_weight = float(spec.get("penalty_weight", 1.0))
+        base = _selection_score(metrics, base_metric)
+        acc = _selection_score(metrics, acc_metric)
+        metrics[name] = base - penalty_weight * max(0.0, min_acc - acc)
+    return metrics
+
+
+def _build_validation_loaders(cfg: dict, synthetic: bool, fallback_loader):
+    if synthetic:
+        return [{"name": "val", "loader": fallback_loader}]
+    val_npzs = _as_list(cfg.get("data", {}).get("val_npzs"))
+    if not val_npzs:
+        return [{"name": "val", "loader": fallback_loader}]
+    batch_size = int(cfg["train"]["batch_size"])
+    workers = int(cfg["train"].get("num_workers", 0))
+    loaders = []
+    for idx, path in enumerate(val_npzs, start=1):
+        loaders.append(
+            {
+                "name": f"val_fold_{idx:02d}",
+                "path": path,
+                "loader": DataLoader(ECGNpzDataset(path), batch_size=batch_size, shuffle=False, num_workers=workers),
+            }
+        )
+    return loaders
+
+
+def _aggregate_validation_metrics(fold_metrics: list[dict]) -> dict:
+    if not fold_metrics:
+        raise ValueError("No validation metrics to aggregate")
+    if len(fold_metrics) == 1:
+        return dict(fold_metrics[0])
+
+    aggregate: dict = {"num_folds": len(fold_metrics), "folds": fold_metrics}
+    keys = set().union(*(metrics.keys() for metrics in fold_metrics))
+    for key in sorted(keys):
+        values = [metrics.get(key) for metrics in fold_metrics if key in metrics]
+        if not values:
+            continue
+        if key == "confusion":
+            aggregate[key] = np.asarray(values, dtype=np.int64).sum(axis=0).tolist()
+        elif key == "samples":
+            aggregate[key] = int(sum(int(value) for value in values))
+        elif all(isinstance(value, (int, float)) for value in values):
+            aggregate[key] = float(sum(float(value) for value in values) / len(values))
+        elif all(isinstance(value, list) for value in values):
+            try:
+                aggregate[key] = np.asarray(values, dtype=np.float64).mean(axis=0).tolist()
+            except ValueError:
+                pass
+    return aggregate
+
+
+def run_validation(
+    model,
+    val_loaders,
+    device,
+    inter_loss,
+    cfg,
+    epoch,
+    class_weights,
+    class_counts,
+) -> dict:
+    fold_metrics = []
+    for item in val_loaders:
+        metrics = run_epoch(
+            model,
+            item["loader"],
+            device,
+            None,
+            inter_loss,
+            None,
+            cfg,
+            epoch,
+            class_weights,
+            class_counts,
+        )
+        metrics["fold_name"] = item["name"]
+        if "path" in item:
+            metrics["fold_path"] = item["path"]
+        fold_metrics.append(metrics)
+    return _aggregate_validation_metrics(fold_metrics)
+
+
 def _metric_list(cfg: dict) -> list[str]:
     train_cfg = cfg.get("train", {})
     primary = str(train_cfg.get("selection_metric", "macro_f1"))
@@ -233,7 +336,7 @@ def _metric_list(cfg: dict) -> list[str]:
 
 
 def _clean_topk_files(work_dir: Path) -> None:
-    for pattern in ("epoch_*.pt", "best_*.pt"):
+    for pattern in ("epoch_*.pt", "best_*.pt", "best.pt"):
         for path in work_dir.glob(pattern):
             if path.is_file():
                 path.unlink()
@@ -338,6 +441,8 @@ def main() -> None:
         cfg["train"]["grad_clip_norm"] = args.grad_clip_norm
     if args.early_stopping_patience is not None:
         cfg["train"]["early_stopping_patience"] = args.early_stopping_patience
+    if args.min_selection_epoch is not None:
+        cfg["train"]["min_selection_epoch"] = args.min_selection_epoch
     if args.model is not None:
         cfg["model"]["name"] = args.model
     if args.branches is not None:
@@ -360,6 +465,7 @@ def main() -> None:
     device = get_device(str(cfg["train"]["device"]))
     logger.info("device=%s", device)
     train_loader, val_loader, test_loader = build_loaders(cfg, args.synthetic, args.batch_size)
+    val_loaders = _build_validation_loaders(cfg, args.synthetic, val_loader)
 
     model = build_ecg_model(cfg).to(device)
 
@@ -414,18 +520,21 @@ def main() -> None:
     best_checkpoints: dict[str, dict] = {}
     checkpoint_candidates: dict[str, list[dict]] = {metric: [] for metric in selection_metrics}
     grad_clip_norm = float(cfg["train"].get("grad_clip_norm", 0.0) or 0.0)
+    min_selection_epoch = int(cfg["train"].get("min_selection_epoch", 1) or 1)
     early_patience = int(cfg["train"].get("early_stopping_patience", 0) or 0)
     early_min_delta = float(cfg["train"].get("early_stopping_min_delta", 0.0) or 0.0)
     stale_epochs = 0
     history = []
     logger.info(
-        "selection_metric=%s selection_metrics=%s save_top_k=%d scheduler=%s grad_clip_norm=%.4g early_stopping_patience=%d",
+        "selection_metric=%s selection_metrics=%s min_selection_epoch=%d save_top_k=%d scheduler=%s grad_clip_norm=%.4g early_stopping_patience=%d val_folds=%d",
         selection_metric,
         selection_metrics,
+        min_selection_epoch,
         save_top_k,
         scheduler_name,
         grad_clip_norm,
         early_patience,
+        len(val_loaders),
     )
 
     for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
@@ -444,7 +553,17 @@ def main() -> None:
             class_counts,
             grad_clip_norm=grad_clip_norm,
         )
-        val_metrics = run_epoch(model, val_loader, device, None, inter_loss, None, cfg, epoch, class_weights, class_counts)
+        val_metrics = run_validation(
+            model,
+            val_loaders,
+            device,
+            inter_loss,
+            cfg,
+            epoch,
+            class_weights,
+            class_counts,
+        )
+        _apply_composite_metrics(val_metrics, cfg)
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(record)
         primary_score = _selection_score(val_metrics, selection_metric)
@@ -467,45 +586,49 @@ def main() -> None:
             val_metrics["minority_recall"],
         )
 
+        eligible_for_selection = epoch >= min_selection_epoch
         primary_improved = False
-        for metric_name in selection_metrics:
-            score = _selection_score(val_metrics, metric_name)
-            checkpoint_candidates[metric_name] = _save_checkpoint_candidates(
-                model,
-                cfg,
-                epoch,
-                score,
-                metric_name,
-                work_dir,
-                checkpoint_candidates[metric_name],
-                save_top_k,
-            )
-            if score > best_scores[metric_name] + early_min_delta:
-                best_scores[metric_name] = score
-                safe_metric = metric_name.replace("/", "_")
-                checkpoint = {
-                    "model": model.state_dict(),
-                    "cfg": cfg,
-                    "epoch": epoch,
-                    "selection_metric": metric_name,
-                    "score": score,
-                }
-                torch.save(checkpoint, work_dir / f"best_{safe_metric}.pt")
-                best_checkpoints[metric_name] = {
-                    "epoch": epoch,
-                    "score": score,
-                    "path": f"best_{safe_metric}.pt",
-                }
-                if metric_name == selection_metric:
-                    torch.save(checkpoint, work_dir / "best.pt")
-                    primary_improved = True
-        if primary_improved:
-            stale_epochs = 0
+        if eligible_for_selection:
+            for metric_name in selection_metrics:
+                score = _selection_score(val_metrics, metric_name)
+                checkpoint_candidates[metric_name] = _save_checkpoint_candidates(
+                    model,
+                    cfg,
+                    epoch,
+                    score,
+                    metric_name,
+                    work_dir,
+                    checkpoint_candidates[metric_name],
+                    save_top_k,
+                )
+                if score > best_scores[metric_name] + early_min_delta:
+                    best_scores[metric_name] = score
+                    safe_metric = metric_name.replace("/", "_")
+                    checkpoint = {
+                        "model": model.state_dict(),
+                        "cfg": cfg,
+                        "epoch": epoch,
+                        "selection_metric": metric_name,
+                        "score": score,
+                    }
+                    torch.save(checkpoint, work_dir / f"best_{safe_metric}.pt")
+                    best_checkpoints[metric_name] = {
+                        "epoch": epoch,
+                        "score": score,
+                        "path": f"best_{safe_metric}.pt",
+                    }
+                    if metric_name == selection_metric:
+                        torch.save(checkpoint, work_dir / "best.pt")
+                        primary_improved = True
+            if primary_improved:
+                stale_epochs = 0
+            else:
+                stale_epochs += 1
         else:
-            stale_epochs += 1
+            logger.info("epoch=%03d skipped_checkpoint_selection min_selection_epoch=%d", epoch, min_selection_epoch)
 
         _step_scheduler(scheduler, scheduler_name, primary_score)
-        if early_patience > 0 and stale_epochs >= early_patience:
+        if eligible_for_selection and early_patience > 0 and stale_epochs >= early_patience:
             logger.info(
                 "early_stop epoch=%03d stale_epochs=%d best_%s=%.6f",
                 epoch,
@@ -514,6 +637,23 @@ def main() -> None:
                 best_scores[selection_metric],
             )
             break
+
+    if not (work_dir / "best.pt").exists():
+        logger.warning(
+            "no eligible checkpoint was selected; saving final epoch because min_selection_epoch=%d exceeded completed epochs",
+            min_selection_epoch,
+        )
+        final_score = _selection_score(val_metrics, selection_metric) if history else -1.0
+        checkpoint = {
+            "model": model.state_dict(),
+            "cfg": cfg,
+            "epoch": history[-1]["epoch"] if history else 0,
+            "selection_metric": selection_metric,
+            "score": final_score,
+        }
+        torch.save(checkpoint, work_dir / "best.pt")
+        best_scores[selection_metric] = final_score
+        best_checkpoints[selection_metric] = {"epoch": checkpoint["epoch"], "score": final_score, "path": "best.pt"}
 
     checkpoint = torch.load(work_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])

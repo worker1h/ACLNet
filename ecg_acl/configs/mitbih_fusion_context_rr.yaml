@@ -2,6 +2,11 @@ seed: 42
 data:
   train_npz: ecg_acl/data/mitbih_context_rr_record/processed/train.npz
   val_npz: ecg_acl/data/mitbih_context_rr_record/processed/val.npz
+  val_npzs: [
+    ecg_acl/data/mitbih_context_rr_record/processed/val_fold_01.npz,
+    ecg_acl/data/mitbih_context_rr_record/processed/val_fold_02.npz,
+    ecg_acl/data/mitbih_context_rr_record/processed/val_fold_03.npz
+  ]
   test_npz: ecg_acl/data/mitbih_context_rr_record/processed/test.npz
   num_classes: 5
   input_channels: 7
@@ -23,8 +28,20 @@ train:
   weight_decay: 0.0001
   num_workers: 0
   device: auto
-  selection_metric: balanced_acc
-  selection_metrics: [balanced_acc, macro_f1, minority_f1]
+  selection_metric: constrained_macro_f1
+  selection_metrics: [constrained_macro_f1, constrained_minority_f1, macro_f1, minority_f1, balanced_acc]
+  min_selection_epoch: 5
+  composite_metrics:
+    constrained_macro_f1:
+      base_metric: macro_f1
+      acc_metric: acc
+      min_acc: 0.88
+      penalty_weight: 1.0
+    constrained_minority_f1:
+      base_metric: minority_f1
+      acc_metric: acc
+      min_acc: 0.88
+      penalty_weight: 1.0
   save_top_k: 5
   minority_classes: [1, 2, 3, 4]
   grad_clip_norm: 1.0

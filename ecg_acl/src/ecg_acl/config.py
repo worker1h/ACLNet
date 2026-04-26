@@ -10,6 +10,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "data": {
         "train_npz": "ecg_acl/data/mitbih/processed/train.npz",
         "val_npz": "ecg_acl/data/mitbih/processed/val.npz",
+        "val_npzs": None,
         "test_npz": "ecg_acl/data/mitbih/processed/test.npz",
         "num_classes": 5,
         "input_channels": 1,
@@ -36,6 +37,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "device": "auto",
         "selection_metric": "macro_f1",
         "selection_metrics": ["macro_f1"],
+        "min_selection_epoch": 1,
+        "composite_metrics": {},
         "save_top_k": 1,
         "minority_classes": [1, 2, 3, 4],
         "grad_clip_norm": 1.0,
