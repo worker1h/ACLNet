@@ -79,6 +79,12 @@ BiRNN + PHM fusion with RR and neighbor-beat context:
 python ecg_acl/train.py --config ecg_acl/configs/mitbih_fusion_context_rr.yaml --use-inter --use-intra
 ```
 
+Milder N-class downsampling ablation:
+
+```shell
+python ecg_acl/train.py --config ecg_acl/configs/mitbih_fusion_context_rr_downsample_mild.yaml --use-inter --use-intra
+```
+
 MIT-BIH is highly imbalanced. The default config enables weighted sampling,
 class-balanced CE, and checkpoint selection by `macro_f1`. The RR fusion config
 also enables dynamic N-class downsampling: every epoch keeps all non-N samples,
