@@ -465,6 +465,10 @@ def main() -> None:
     device = get_device(str(cfg["train"]["device"]))
     logger.info("device=%s", device)
     train_loader, val_loader, test_loader = build_loaders(cfg, args.synthetic, args.batch_size)
+    sampler = getattr(train_loader, "sampler", None)
+    sampler_summary = getattr(sampler, "summary", None)
+    if callable(sampler_summary):
+        logger.info("train_sampler=%s", sampler_summary())
     val_loaders = _build_validation_loaders(cfg, args.synthetic, val_loader)
 
     model = build_ecg_model(cfg).to(device)

@@ -57,6 +57,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "imbalance": {
         "weighted_sampler": True,
         "sampler_power": 1.0,
+        "normal_downsample": {
+            "enabled": False,
+            "normal_class": 0,
+            "ratio_to_abnormal": 3.0,
+            "mode": "dynamic",
+            "weighted": True,
+            "replacement": True,
+            "num_samples": "pool",
+        },
         "loss_type": "class_balanced_ce",
         "class_balanced_loss": True,
         "effective_num_beta": 0.999,

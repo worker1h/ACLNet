@@ -54,6 +54,14 @@ scheduler:
 imbalance:
   weighted_sampler: true
   sampler_power: 1.0
+  normal_downsample:
+    enabled: true
+    normal_class: 0
+    ratio_to_abnormal: 3.0
+    mode: dynamic
+    weighted: true
+    replacement: true
+    num_samples: pool
   loss_type: class_balanced_ce
   class_balanced_loss: true
   effective_num_beta: 0.999

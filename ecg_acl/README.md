@@ -80,7 +80,10 @@ python ecg_acl/train.py --config ecg_acl/configs/mitbih_fusion_context_rr.yaml -
 ```
 
 MIT-BIH is highly imbalanced. The default config enables weighted sampling,
-class-balanced CE, and checkpoint selection by `macro_f1`. Optional
+class-balanced CE, and checkpoint selection by `macro_f1`. The RR fusion config
+also enables dynamic N-class downsampling: every epoch keeps all non-N samples,
+randomly selects an N subset controlled by `imbalance.normal_downsample`, and
+optionally applies class-weighted sampling inside that reduced pool. Optional
 `focal` / `class_balanced_focal`, `balanced_softmax`, and minority-only ECG
 augmentation are available in the config for ablations. To reproduce the plain
 imbalanced setting, disable the balancing options explicitly:
