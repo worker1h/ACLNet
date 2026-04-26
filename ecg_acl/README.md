@@ -85,6 +85,12 @@ Milder N-class downsampling ablation:
 python ecg_acl/train.py --config ecg_acl/configs/mitbih_fusion_context_rr_downsample_mild.yaml --use-inter --use-intra
 ```
 
+N-class downsampling ratio 4.0 ablation:
+
+```shell
+python ecg_acl/train.py --config ecg_acl/configs/mitbih_fusion_context_rr_downsample_ratio4.yaml --use-inter --use-intra
+```
+
 MIT-BIH is highly imbalanced. The default config enables weighted sampling,
 class-balanced CE, and checkpoint selection by `macro_f1`. The RR fusion config
 also enables dynamic N-class downsampling: every epoch keeps all non-N samples,
